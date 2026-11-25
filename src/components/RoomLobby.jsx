@@ -16,16 +16,30 @@ import {
   RotateCcw
 } from 'lucide-react';
 
-export default function RoomLobby({ onCreateRoom, onJoinRoom }) {
-  const [tab, setTab] = useState('create'); // 'create' | 'join' | 'browse'
-  const [selectedTeamId, setSelectedTeamId] = useState('CSK');
-  const [ownerName, setOwnerName] = useState('Captain Tactician');
+export default function RoomLobby({ onCreateRoom, onJoinRoom, initialRoomCode = '', existingRoomData = null }) {
+  const [tab, setTab] = useState(initialRoomCode ? 'join' : 'create'); // 'create' | 'join' | 'browse'
+  const [selectedTeamId, setSelectedTeamId] = useState(() => {
+    if (existingRoomData?.claimedTeams) {
+      const unclaimed = TEAMS.find(t => !existingRoomData.claimedTeams[t.id]);
+      if (unclaimed) return unclaimed.id;
+    }
+    return 'MI';
+  });
+  const [ownerName, setOwnerName] = useState('Challenger');
   const [roomCode, setRoomCode] = useState('8AB3SC');
-  const [joinCode, setJoinCode] = useState('');
+  const [joinCode, setJoinCode] = useState(initialRoomCode || '');
   const [visibility, setVisibility] = useState('public');
   const [startingPurse, setStartingPurse] = useState(120.0);
   const [bidTimer, setBidTimer] = useState(10);
   const [gameMode, setGameMode] = useState('mega'); // 'mega' | 'legends' | 'mini'
+
+  // Update join code if initialRoomCode changes
+  React.useEffect(() => {
+    if (initialRoomCode) {
+      setJoinCode(initialRoomCode);
+      setTab('join');
+    }
+  }, [initialRoomCode]);
 
   // Generate random 6-char room code
   const randomizeCode = () => {
@@ -362,7 +376,24 @@ export default function RoomLobby({ onCreateRoom, onJoinRoom }) {
 
         {/* TAB 2: JOIN ROOM */}
         {tab === 'join' && (
-          <div className="max-w-xl mx-auto w-full bg-slate-900 border border-slate-800 rounded-3xl p-8 shadow-2xl backdrop-blur-xl">
+          <div className="max-w-xl mx-auto w-full bg-slate-900 border border-slate-800 rounded-3xl p-6 sm:p-8 shadow-2xl backdrop-blur-xl">
+            
+            {/* Invite Notice Banner */}
+            {initialRoomCode && (
+              <div className="mb-6 p-4 rounded-2xl bg-amber-500/10 border-2 border-amber-500/40 flex items-start gap-3">
+                <div className="p-2 rounded-xl bg-amber-500/20 text-amber-400 mt-0.5">
+                  <Users className="w-5 h-5" />
+                </div>
+                <div>
+                  <h4 className="text-sm font-black text-amber-300">You've Been Invited!</h4>
+                  <p className="text-xs text-slate-300 mt-0.5">
+                    Your friend invited you to join room <strong className="text-amber-400 uppercase tracking-wider">{initialRoomCode}</strong>.
+                    Enter your nickname and pick your franchise below to step into the auction arena.
+                  </p>
+                </div>
+              </div>
+            )}
+
             <h2 className="text-2xl font-black text-white text-center mb-1 flex items-center justify-center gap-2">
               <LogIn className="w-6 h-6 text-amber-400" />
               <span>Join Sports Auction Room</span>
@@ -372,7 +403,7 @@ export default function RoomLobby({ onCreateRoom, onJoinRoom }) {
             {/* Room Code Input */}
             <div className="mb-5">
               <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block mb-2">
-                Enter Room Code
+                Room Code
               </label>
               <input
                 type="text"
@@ -380,7 +411,7 @@ export default function RoomLobby({ onCreateRoom, onJoinRoom }) {
                 value={joinCode}
                 onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
                 maxLength={8}
-                className="w-full py-3.5 px-4 rounded-2xl bg-slate-950 border-2 border-slate-800 text-amber-400 font-black text-2xl uppercase tracking-widest text-center focus:outline-none focus:border-amber-400"
+                className="w-full py-3 px-4 rounded-2xl bg-slate-950 border-2 border-slate-800 text-amber-400 font-black text-2xl uppercase tracking-widest text-center focus:outline-none focus:border-amber-400"
               />
             </div>
 
@@ -393,33 +424,63 @@ export default function RoomLobby({ onCreateRoom, onJoinRoom }) {
                 type="text"
                 value={ownerName}
                 onChange={(e) => setOwnerName(e.target.value)}
-                placeholder="e.g. Player"
+                placeholder="e.g. Master Strategist"
                 className="w-full py-3 px-4 rounded-xl bg-slate-950 border border-slate-800 text-white font-bold text-sm focus:outline-none focus:border-amber-400"
               />
             </div>
 
             {/* Preferred Franchise */}
             <div className="mb-6">
-              <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block mb-2">
-                Choose Preferred Franchise
-              </label>
-              <select
-                value={selectedTeamId}
-                onChange={(e) => setSelectedTeamId(e.target.value)}
-                className="w-full py-3 px-4 rounded-xl bg-slate-950 border border-slate-800 text-white font-bold text-sm focus:outline-none focus:border-amber-400"
-              >
-                {TEAMS.map(t => (
-                  <option key={t.id} value={t.id}>{t.name} ({t.shortName})</option>
-                ))}
-              </select>
+              <div className="flex items-center justify-between mb-2">
+                <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">
+                  Select Franchise
+                </label>
+                {existingRoomData?.claimedTeams && (
+                  <span className="text-[11px] text-amber-400 font-medium">
+                    {Object.keys(existingRoomData.claimedTeams).length} teams already claimed
+                  </span>
+                )}
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                {TEAMS.map(t => {
+                  const isClaimed = existingRoomData?.claimedTeams && existingRoomData.claimedTeams[t.id];
+                  const isSelected = selectedTeamId === t.id;
+
+                  return (
+                    <button
+                      key={t.id}
+                      type="button"
+                      disabled={isClaimed}
+                      onClick={() => setSelectedTeamId(t.id)}
+                      className={`p-2.5 rounded-xl border flex flex-col items-center justify-center gap-1.5 transition-all relative ${
+                        isClaimed
+                          ? 'opacity-40 cursor-not-allowed bg-slate-950 border-slate-800 text-slate-500'
+                          : isSelected
+                          ? 'border-amber-400 bg-slate-800 shadow-[0_0_15px_rgba(250,204,21,0.3)]'
+                          : 'bg-slate-950 border-slate-800 hover:border-slate-700 text-slate-300'
+                      }`}
+                    >
+                      <div 
+                        className="w-7 h-7 rounded-lg flex items-center justify-center text-[10px] font-black"
+                        style={{ backgroundColor: t.primaryColor, color: t.textColor }}
+                      >
+                        {t.shortName}
+                      </div>
+                      <span className="text-[10px] font-bold truncate max-w-full">
+                        {isClaimed ? 'Claimed' : t.shortName}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
 
             <button
               onClick={() => handleJoin()}
-              className="w-full py-4 px-6 rounded-2xl bg-gradient-to-r from-amber-500 via-yellow-400 to-amber-600 hover:from-amber-400 text-slate-950 font-black text-base uppercase shadow-lg transition-all flex items-center justify-center gap-2"
+              className="w-full py-4 px-6 rounded-2xl bg-gradient-to-r from-amber-500 via-yellow-400 to-amber-600 hover:from-amber-400 text-slate-950 font-black text-base uppercase shadow-lg transition-all flex items-center justify-center gap-2 transform hover:scale-[1.01] active:scale-[0.99]"
             >
               <LogIn className="w-5 h-5 stroke-[2.5]" />
-              <span>Join Room & Enter Lobby</span>
+              <span>Join Room & Enter Waiting Lobby</span>
             </button>
           </div>
         )}

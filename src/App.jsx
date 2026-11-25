@@ -1,8 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { TEAMS } from './data/teams';
 import { PLAYERS } from './data/players';
 import { sounds } from './utils/audio';
 import { decideBotBid, getNextBidIncrement, formatMoney } from './utils/rules';
+import { multiplayer } from './utils/multiplayer';
 
 import RoomLobby from './components/RoomLobby';
 import WaitingRoom from './components/WaitingRoom';
@@ -18,9 +19,26 @@ export default function App() {
   // Navigation Screens: 'lobby' | 'waiting' | 'auction'
   const [screen, setScreen] = useState('lobby');
 
+  // Parse room code from URL parameters (?room=8AB3SC or #/room/8AB3SC)
+  const [initialRoomCode, setInitialRoomCode] = useState(() => {
+    if (typeof window === 'undefined') return '';
+    try {
+      const urlParams = new URLSearchParams(window.location.search);
+      const code = urlParams.get('room');
+      if (code) return code.toUpperCase().trim();
+      if (window.location.hash) {
+        const match = window.location.hash.match(/room[=/]([A-Za-z0-9]+)/);
+        if (match) return match[1].toUpperCase().trim();
+      }
+    } catch (e) {
+      console.warn('URL parsing error:', e);
+    }
+    return '';
+  });
+
   // Room Info
   const [room, setRoom] = useState({
-    code: '8AB3SC',
+    code: initialRoomCode || '8AB3SC',
     startingPurse: 120.0,
     bidTimer: 10,
     gameMode: 'mega',
@@ -29,7 +47,8 @@ export default function App() {
   });
 
   const [userTeamId, setUserTeamId] = useState('CSK');
-  const [isHost, setIsHost] = useState(true);
+  const [userName, setUserName] = useState('Captain');
+  const [isHost, setIsHost] = useState(!initialRoomCode); // If invited via link, default to guest
   const [teams, setTeams] = useState([]);
   const [pool, setPool] = useState([]);
   const [currentIndex, setCurrentIndex] = useState(0);
@@ -44,17 +63,184 @@ export default function App() {
   const [isStriking, setIsStriking] = useState(false);
   const [callOutText, setCallOutText] = useState('');
 
-  // Modals & Navigation
+  // Modals, Navigation & Chat
   const [activeTab, setActiveTab] = useState('arena');
   const [soldCelebration, setSoldCelebration] = useState(null);
   const [muted, setMuted] = useState(false);
   const [selectedSquadTeamId, setSelectedSquadTeamId] = useState(null);
+  const [chatMessages, setChatMessages] = useState([
+    { sender: 'System', text: 'Welcome to Sports Auction! Claim your team and invite friends.', time: 'Just now' }
+  ]);
 
   const currentPlayer = pool[currentIndex] || null;
+  const isHostRef = useRef(isHost);
+  isHostRef.current = isHost;
+  const roomRef = useRef(room);
+  roomRef.current = room;
+  const currentIndexRef = useRef(currentIndex);
+  currentIndexRef.current = currentIndex;
+
+  // On initial mount, if room code exists in URL, check for saved snapshot
+  useEffect(() => {
+    if (initialRoomCode) {
+      const snapshot = multiplayer.getRoomSnapshot(initialRoomCode);
+      if (snapshot) {
+        setRoom(snapshot);
+      } else {
+        setRoom(prev => ({ ...prev, code: initialRoomCode }));
+      }
+    }
+  }, [initialRoomCode]);
+
+  // Keep URL updated with room code when in waiting or auction
+  useEffect(() => {
+    if (room?.code && screen !== 'lobby' && typeof window !== 'undefined') {
+      try {
+        const url = new URL(window.location.href);
+        if (url.searchParams.get('room') !== room.code) {
+          url.searchParams.set('room', room.code);
+          window.history.replaceState({}, '', url.toString());
+        }
+      } catch (e) {}
+    }
+  }, [room?.code, screen]);
+
+  // Handle Multiplayer Incoming Messages
+  useEffect(() => {
+    const unsubscribe = multiplayer.subscribe((action) => {
+      if (!action || !action.type) return;
+
+      switch (action.type) {
+        case 'PLAYER_JOINED': {
+          const { teamId, ownerName } = action;
+          const team = TEAMS.find(t => t.id === teamId);
+          const teamLabel = team ? team.shortName : teamId;
+
+          setRoom(prev => {
+            const updated = {
+              ...prev,
+              claimedTeams: {
+                ...(prev.claimedTeams || {}),
+                [teamId]: { name: ownerName, isHost: false }
+              }
+            };
+            if (isHostRef.current) {
+              multiplayer.saveRoomSnapshot(updated);
+              // Host broadcasts authoritative state back to new guest
+              multiplayer.broadcast({
+                type: 'SYNC_ROOM_STATE',
+                room: updated
+              });
+            }
+            return updated;
+          });
+
+          setChatMessages(prev => [
+            ...prev,
+            { sender: 'System', text: `🎉 ${ownerName} joined the room as ${teamLabel}!`, time: 'Now' }
+          ]);
+          sounds.playBidSound();
+          break;
+        }
+
+        case 'SYNC_ROOM_STATE': {
+          if (action.room) {
+            setRoom(action.room);
+            if (action.room.bidTimer) {
+              setMaxTimer(action.room.bidTimer);
+              setTimer(action.room.bidTimer);
+            }
+          }
+          break;
+        }
+
+        case 'REQUEST_ROOM_SYNC': {
+          if (isHostRef.current) {
+            multiplayer.broadcast({
+              type: 'SYNC_ROOM_STATE',
+              room: roomRef.current
+            });
+          }
+          break;
+        }
+
+        case 'SWITCH_TEAM': {
+          const { oldTeamId, newTeamId, ownerName } = action;
+          setRoom(prev => {
+            const updated = { ...prev.claimedTeams };
+            delete updated[oldTeamId];
+            updated[newTeamId] = { name: ownerName, isHost: false };
+            const nextRoom = { ...prev, claimedTeams: updated };
+            if (isHostRef.current) {
+              multiplayer.saveRoomSnapshot(nextRoom);
+              multiplayer.broadcast({ type: 'SYNC_ROOM_STATE', room: nextRoom });
+            }
+            return nextRoom;
+          });
+          break;
+        }
+
+        case 'CHAT_MESSAGE': {
+          if (action.message) {
+            setChatMessages(prev => [...prev, action.message]);
+          }
+          break;
+        }
+
+        case 'START_AUCTION': {
+          setTeams(action.teams);
+          setPool(action.pool || [...PLAYERS]);
+          setCurrentIndex(0);
+          setCurrentPrice(0);
+          setHighestBidder(null);
+          setBidHistory([]);
+          setScreen('auction');
+          setIsPaused(false);
+          sounds.playGavelStrike();
+          break;
+        }
+
+        case 'PLACE_BID': {
+          // Process remote bid
+          placeBid(action.teamId, true);
+          break;
+        }
+
+        case 'ROUND_RESULT': {
+          if (!isHostRef.current) {
+            if (action.wasSold && action.winner) {
+              sounds.playSoldFanfare();
+              setSoldCelebration({
+                player: pool[action.playerIndex] || currentPlayer,
+                winningTeam: action.winner,
+                soldPrice: action.soldPrice
+              });
+              moveToNextPlayer(true, action.soldPrice, action.winner);
+            } else {
+              sounds.playUnsoldTone();
+              moveToNextPlayer(false);
+            }
+          }
+          break;
+        }
+
+        case 'SET_PAUSE': {
+          setIsPaused(action.isPaused);
+          break;
+        }
+
+        default:
+          break;
+      }
+    });
+
+    return () => unsubscribe();
+  }, [pool, currentPlayer]);
 
   // Handle Create Room
   const handleCreateRoom = ({ code, teamId, ownerName, visibility, startingPurse, bidTimer, gameMode, modeName }) => {
     setUserTeamId(teamId);
+    setUserName(ownerName);
     setIsHost(true);
     setMaxTimer(bidTimer);
     setTimer(bidTimer);
@@ -63,14 +249,22 @@ export default function App() {
       [teamId]: { name: ownerName, isHost: true }
     };
 
-    setRoom({
+    const newRoom = {
       code,
       startingPurse,
       bidTimer,
       gameMode,
       modeName,
       claimedTeams: initialClaimed
-    });
+    };
+
+    setRoom(newRoom);
+    multiplayer.init(code, true, teamId, ownerName);
+    multiplayer.saveRoomSnapshot(newRoom);
+
+    setChatMessages([
+      { sender: 'System', text: `Room ${code} created! Share the link with friends to play together.`, time: 'Just now' }
+    ]);
 
     setScreen('waiting');
   };
@@ -78,23 +272,39 @@ export default function App() {
   // Handle Join Room
   const handleJoinRoom = ({ code, teamId, ownerName }) => {
     setUserTeamId(teamId);
+    setUserName(ownerName);
     setIsHost(false);
     setMaxTimer(10);
     setTimer(10);
 
-    const initialClaimed = {
-      'MI': { name: 'Host (Stun)', isHost: true },
+    const snapshot = multiplayer.getRoomSnapshot(code);
+    const updatedClaimed = {
+      ...(snapshot?.claimedTeams || {}),
       [teamId]: { name: ownerName, isHost: false }
     };
 
-    setRoom({
+    const updatedRoom = {
       code,
-      startingPurse: 120.0,
-      bidTimer: 10,
-      gameMode: 'mega',
-      modeName: 'IPL 2026 Mega Auction',
-      claimedTeams: initialClaimed
+      startingPurse: snapshot?.startingPurse || 120.0,
+      bidTimer: snapshot?.bidTimer || 10,
+      gameMode: snapshot?.gameMode || 'mega',
+      modeName: snapshot?.modeName || 'IPL 2026 Mega Auction',
+      claimedTeams: updatedClaimed
+    };
+
+    setRoom(updatedRoom);
+    multiplayer.init(code, false, teamId, ownerName);
+
+    // Broadcast join to Host
+    multiplayer.broadcast({
+      type: 'PLAYER_JOINED',
+      teamId,
+      ownerName
     });
+
+    setChatMessages([
+      { sender: 'System', text: `Joined Room ${code} as ${ownerName}! Waiting for host to launch.`, time: 'Just now' }
+    ]);
 
     setScreen('waiting');
   };
@@ -102,12 +312,29 @@ export default function App() {
   // Switch Team in Waiting Room
   const handleSwitchTeam = (newTeamId) => {
     const currentClaimed = { ...room.claimedTeams };
-    const myInfo = currentClaimed[userTeamId] || { name: 'Player', isHost };
+    const myInfo = currentClaimed[userTeamId] || { name: userName, isHost };
     delete currentClaimed[userTeamId];
     currentClaimed[newTeamId] = myInfo;
 
+    const nextRoom = { ...prevRoom => ({ ...prevRoom, claimedTeams: currentClaimed }) };
     setRoom(prev => ({ ...prev, claimedTeams: currentClaimed }));
     setUserTeamId(newTeamId);
+
+    multiplayer.broadcast({
+      type: 'SWITCH_TEAM',
+      oldTeamId: userTeamId,
+      newTeamId,
+      ownerName: myInfo.name
+    });
+  };
+
+  // Send Chat Message
+  const handleSendChatMessage = (newMsg) => {
+    setChatMessages(prev => [...prev, newMsg]);
+    multiplayer.broadcast({
+      type: 'CHAT_MESSAGE',
+      message: newMsg
+    });
   };
 
   // Start Auction from Waiting Room
@@ -115,12 +342,11 @@ export default function App() {
     const isMini = room.gameMode === 'mini';
 
     const initializedTeams = TEAMS.map(t => {
-      const claimed = room.claimedTeams[t.id];
+      const claimed = room.claimedTeams ? room.claimedTeams[t.id] : null;
       const teamPurse = isMini ? t.mini2026Purse : room.startingPurse;
       const initialRetained = isMini ? t.mini2026Retained : 0;
       const initialOverseas = isMini ? t.mini2026Overseas : 0;
 
-      // Dummy retained placeholders if in Mini mode
       const placeholderSquad = isMini ? Array.from({ length: initialRetained }, (_, i) => ({
         id: `ret_${t.id}_${i}`,
         name: `Retained Player ${i + 1}`,
@@ -148,6 +374,28 @@ export default function App() {
     setBidHistory([]);
     setScreen('auction');
     setIsPaused(false);
+
+    // Broadcast to guests so they join the arena together!
+    multiplayer.broadcast({
+      type: 'START_AUCTION',
+      teams: initializedTeams,
+      pool: PLAYERS,
+      gameMode: room.gameMode
+    });
+  };
+
+  // Leave room & clear URL
+  const handleLeaveRoom = () => {
+    multiplayer.cleanup();
+    if (typeof window !== 'undefined') {
+      try {
+        const url = new URL(window.location.href);
+        url.searchParams.delete('room');
+        window.history.replaceState({}, '', url.toString());
+      } catch (e) {}
+    }
+    setScreen('lobby');
+    setInitialRoomCode('');
   };
 
   // Sound Mute Toggle
@@ -167,9 +415,8 @@ export default function App() {
     }, 450);
   };
 
-  // Place a Bid (Human or Bot)
-  // Exact playauctiongame rule: on each valid bid, countdown resets to 5s!
-  const placeBid = (teamId) => {
+  // Place a Bid (Human or Bot, Local or Remote)
+  const placeBid = (teamId, isRemote = false) => {
     if (isPaused || !currentPlayer) return;
 
     const biddingTeam = teams.find(t => t.id === teamId);
@@ -190,13 +437,29 @@ export default function App() {
     setCallOutText('');
     sounds.playBidSound();
     triggerGavel();
+
+    // Broadcast bid if placed locally
+    if (!isRemote) {
+      multiplayer.broadcast({
+        type: 'PLACE_BID',
+        teamId,
+        nextPrice
+      });
+    }
   };
 
-  // Skip or Pass current player
+  // Skip or Pass current player (Host only)
   const handlePassPlayer = () => {
-    if (!currentPlayer) return;
+    if (!currentPlayer || !isHost) return;
     sounds.playUnsoldTone();
     moveToNextPlayer(false);
+    multiplayer.broadcast({
+      type: 'ROUND_RESULT',
+      wasSold: false,
+      soldPrice: 0,
+      winner: null,
+      playerIndex: currentIndex
+    });
   };
 
   // Move to next player after SOLD or UNSOLD
@@ -240,7 +503,17 @@ export default function App() {
     setCurrentIndex(prev => prev + 1);
   };
 
-  // Timer Tick Hook
+  // Pause / Resume toggle
+  const handleTogglePause = () => {
+    const nextState = !isPaused;
+    setIsPaused(nextState);
+    multiplayer.broadcast({
+      type: 'SET_PAUSE',
+      isPaused: nextState
+    });
+  };
+
+  // Timer Tick Hook (Authoritative on Host)
   useEffect(() => {
     if (screen !== 'auction' || isPaused || !currentPlayer || soldCelebration) return;
 
@@ -248,17 +521,34 @@ export default function App() {
       setTimer(prev => {
         if (prev <= 1) {
           clearInterval(interval);
-          if (highestBidder) {
-            sounds.playSoldFanfare();
-            setSoldCelebration({
-              player: currentPlayer,
-              winningTeam: highestBidder,
-              soldPrice: currentPrice
-            });
-            moveToNextPlayer(true, currentPrice, highestBidder);
-          } else {
-            sounds.playUnsoldTone();
-            moveToNextPlayer(false);
+          
+          if (isHost) {
+            if (highestBidder) {
+              sounds.playSoldFanfare();
+              setSoldCelebration({
+                player: currentPlayer,
+                winningTeam: highestBidder,
+                soldPrice: currentPrice
+              });
+              moveToNextPlayer(true, currentPrice, highestBidder);
+              multiplayer.broadcast({
+                type: 'ROUND_RESULT',
+                wasSold: true,
+                soldPrice: currentPrice,
+                winner: highestBidder,
+                playerIndex: currentIndex
+              });
+            } else {
+              sounds.playUnsoldTone();
+              moveToNextPlayer(false);
+              multiplayer.broadcast({
+                type: 'ROUND_RESULT',
+                wasSold: false,
+                soldPrice: 0,
+                winner: null,
+                playerIndex: currentIndex
+              });
+            }
           }
           return 0;
         }
@@ -281,15 +571,18 @@ export default function App() {
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [screen, isPaused, currentPlayer, currentPrice, highestBidder, soldCelebration, maxTimer]);
+  }, [screen, isHost, isPaused, currentPlayer, currentPrice, highestBidder, soldCelebration, maxTimer, currentIndex]);
 
-  // AI Franchise Bots Simulation Hook
+  // AI Franchise Bots Simulation Hook (Authoritative: Only Host simulates bots!)
   useEffect(() => {
-    if (screen !== 'auction' || isPaused || !currentPlayer || soldCelebration) return;
+    if (screen !== 'auction' || !isHost || isPaused || !currentPlayer || soldCelebration) return;
 
     const delay = Math.random() * 1400 + 800;
     const timeout = setTimeout(() => {
-      const eligibleBots = teams.filter(t => t.id !== userTeamId && t.id !== highestBidder?.id);
+      const eligibleBots = teams.filter(t => {
+        const isHuman = room.claimedTeams && room.claimedTeams[t.id];
+        return !isHuman && t.id !== highestBidder?.id;
+      });
       if (eligibleBots.length === 0) return;
 
       const randomBot = eligibleBots[Math.floor(Math.random() * eligibleBots.length)];
@@ -301,7 +594,7 @@ export default function App() {
     }, delay);
 
     return () => clearTimeout(timeout);
-  }, [screen, isPaused, currentPlayer, currentPrice, highestBidder, soldCelebration, teams, userTeamId]);
+  }, [screen, isHost, isPaused, currentPlayer, currentPrice, highestBidder, soldCelebration, teams, room.claimedTeams]);
 
   // SCREEN 1: ROOM CREATION & LOBBY
   if (screen === 'lobby') {
@@ -309,6 +602,8 @@ export default function App() {
       <RoomLobby
         onCreateRoom={handleCreateRoom}
         onJoinRoom={handleJoinRoom}
+        initialRoomCode={initialRoomCode}
+        existingRoomData={room}
       />
     );
   }
@@ -320,9 +615,11 @@ export default function App() {
         room={room}
         userTeamId={userTeamId}
         isHost={isHost}
+        chatMessages={chatMessages}
+        onSendMessage={handleSendChatMessage}
         onSwitchTeam={handleSwitchTeam}
         onStartAuction={handleStartAuctionFromWaiting}
-        onLeaveRoom={() => setScreen('lobby')}
+        onLeaveRoom={handleLeaveRoom}
       />
     );
   }
@@ -338,17 +635,16 @@ export default function App() {
       
       {/* Top Navbar */}
       <Navbar
+        userTeam={userTeam}
+        room={room}
         activeTab={activeTab}
         setActiveTab={setActiveTab}
-        roomCode={room.code}
-        userTeam={userTeam}
-        muted={muted}
-        onToggleMute={handleToggleMute}
-        onLeaveRoom={() => setScreen('waiting')}
+        onOpenSquad={() => setSelectedSquadTeamId(userTeamId)}
+        onLeaveRoom={handleLeaveRoom}
       />
 
-      {/* Main Auction Presentation Stage */}
-      <main className="max-w-7xl mx-auto w-full p-4 sm:p-6 flex-1 flex flex-col justify-center">
+      {/* Main Content Area based on Tab */}
+      <main className="max-w-7xl mx-auto w-full p-3 sm:p-5 flex-1 flex flex-col">
         {activeTab === 'arena' && (
           <AuctionPodium
             player={currentPlayer}
@@ -361,41 +657,57 @@ export default function App() {
             isStriking={isStriking}
             callOutText={callOutText}
             bidHistory={bidHistory}
-            onPlaceBid={placeBid}
-            onTogglePause={() => setIsPaused(p => !p)}
+            onPlaceBid={() => placeBid(userTeamId)}
+            onTogglePause={handleTogglePause}
             onPassPlayer={handlePassPlayer}
             muted={muted}
             onToggleMute={handleToggleMute}
           />
         )}
 
+        {activeTab === 'pool' && (
+          <div className="py-2">
+            <PlayersPoolModal
+              pool={pool}
+              currentIndex={currentIndex}
+              teams={teams}
+              onClose={() => setActiveTab('arena')}
+            />
+          </div>
+        )}
+
         {activeTab === 'squads' && (
-          <SquadsModal
-            teams={teams}
-            userTeamId={userTeamId}
-            initialTeamId={selectedSquadTeamId || userTeamId}
-            onClose={() => setActiveTab('arena')}
-          />
+          <div className="py-2">
+            <SquadsModal
+              teams={teams}
+              initialTeamId={selectedSquadTeamId || userTeamId}
+              onClose={() => setActiveTab('arena')}
+            />
+          </div>
         )}
 
         {activeTab === 'xi' && (
-          <PlayingXIAnalyzer
-            userTeam={userTeam}
-            onClose={() => setActiveTab('arena')}
-          />
-        )}
-
-        {activeTab === 'pool' && (
-          <PlayersPoolModal
-            upcomingPlayers={upcomingPlayers}
-            soldPlayers={soldPlayers}
-            unsoldPlayers={unsoldPlayers}
-            onClose={() => setActiveTab('arena')}
-          />
+          <div className="py-2">
+            <PlayingXIAnalyzer
+              team={userTeam}
+              onClose={() => setActiveTab('arena')}
+            />
+          </div>
         )}
       </main>
 
-      {/* Role-Specific SOLD Celebration Overlay */}
+      {/* Bottom Live Teams Ticker */}
+      <TeamsTicker
+        teams={teams}
+        highestBidder={highestBidder}
+        userTeamId={userTeamId}
+        onSelectTeam={(teamId) => {
+          setSelectedSquadTeamId(teamId);
+          setActiveTab('squads');
+        }}
+      />
+
+      {/* Sold Celebration Overlay */}
       {soldCelebration && (
         <SoldCelebrationModal
           player={soldCelebration.player}
@@ -405,15 +717,6 @@ export default function App() {
         />
       )}
 
-      {/* Bottom Teams Ticker */}
-      <TeamsTicker
-        teams={teams}
-        userTeamId={userTeamId}
-        onSelectTeam={(teamId) => {
-          setSelectedSquadTeamId(teamId);
-          setActiveTab('squads');
-        }}
-      />
     </div>
   );
 }

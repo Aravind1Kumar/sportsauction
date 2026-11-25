@@ -23,19 +23,25 @@ export default function WaitingRoom({
   room,
   userTeamId,
   isHost,
+  chatMessages: externalChatMessages,
+  onSendMessage: externalOnSendMessage,
   onSwitchTeam,
   onStartAuction,
   onLeaveRoom
 }) {
   const [copied, setCopied] = useState(false);
-  const [chatMessages, setChatMessages] = useState([
+  const [localChatMessages, setLocalChatMessages] = useState([
     { sender: 'System', text: `Room ${room.code} created! Share the code or link with friends.`, time: 'Just now' },
     { sender: 'Bot (MI)', text: 'Mumbai Indians are ready for the bidding war!', time: 'Just now' }
   ]);
   const [inputText, setInputText] = useState('');
   const [fillBots, setFillBots] = useState(true);
 
-  const inviteLink = `${window.location.origin}/?room=${room.code}`;
+  const chatMessages = externalChatMessages || localChatMessages;
+
+  const origin = typeof window !== 'undefined' ? window.location.origin : '';
+  const pathname = typeof window !== 'undefined' ? window.location.pathname : '/';
+  const inviteLink = `${origin}${pathname}?room=${room.code}`;
 
   const handleCopyLink = () => {
     navigator.clipboard.writeText(inviteLink);
@@ -59,7 +65,11 @@ export default function WaitingRoom({
       time: 'Now'
     };
 
-    setChatMessages(prev => [...prev, newMsg]);
+    if (externalOnSendMessage) {
+      externalOnSendMessage(newMsg);
+    } else {
+      setLocalChatMessages(prev => [...prev, newMsg]);
+    }
     setInputText('');
   };
 
