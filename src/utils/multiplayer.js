@@ -1,4 +1,4 @@
-// Real-Time Cross-Tab, Local-Storage and P2P Multiplayer Synchronizer for Sports Auction
+// Global Cross-Device & Cross-Tab Real-Time Synchronizer for Sports Auction
 
 class MultiplayerManager {
   constructor() {
@@ -6,13 +6,13 @@ class MultiplayerManager {
     this.isHost = false;
     this.userTeamId = null;
     this.userName = '';
+    this.clientId = 'client_' + Math.random().toString(36).substr(2, 9);
     this.channel = null;
-    this.peer = null;
-    this.connections = [];
-    this.hostConnection = null;
+    this.ws = null;
+    this.sse = null;
+    this.reconnectTimer = null;
     this.listeners = new Set();
-    this.pollInterval = null;
-    this.lastProcessedSyncTime = 0;
+    this.lastProcessedMessageId = null;
   }
 
   // Initialize room sync
@@ -23,12 +23,12 @@ class MultiplayerManager {
     this.userTeamId = userTeamId;
     this.userName = userName;
 
-    // 1. Setup BroadcastChannel (instant zero-latency cross-tab communication)
+    // 1. Setup local BroadcastChannel (instant zero-latency for same-browser tabs)
     if (typeof window !== 'undefined' && window.BroadcastChannel) {
       try {
         this.channel = new BroadcastChannel(`sports_auction_${this.roomCode}`);
         this.channel.onmessage = (event) => {
-          if (event.data && event.data.timestamp !== this.lastProcessedSyncTime) {
+          if (event.data && event.data.senderId !== this.clientId) {
             this.notifyListeners(event.data);
           }
         };
@@ -37,143 +37,122 @@ class MultiplayerManager {
       }
     }
 
-    // 2. Setup localStorage storage event listener
+    // 2. Setup localStorage storage event listener (cross-window fallback)
     if (typeof window !== 'undefined') {
       window.addEventListener('storage', this.handleStorageEvent);
+    }
 
-      // 3. Fallback Heartbeat Poller (checks localStorage every 1.2s for room state updates)
-      this.pollInterval = setInterval(() => {
+    // 3. Setup Global Cloud Relay (Phone <-> PC cross-device WebSocket & SSE)
+    this.connectCloudRelay();
+  }
+
+  connectCloudRelay() {
+    if (!this.roomCode || typeof window === 'undefined') return;
+
+    const topic = `sports-auction-${this.roomCode.toLowerCase().replace(/[^a-z0-9]/g, '')}`;
+    const wsUrl = `wss://ntfy.sh/${topic}/ws`;
+
+    try {
+      this.ws = new WebSocket(wsUrl);
+
+      this.ws.onopen = () => {
+        console.log('[Multiplayer Relay] Connected for room:', this.roomCode);
+
+        // When a guest joins, immediately request authoritative room state from host
+        if (!this.isHost) {
+          setTimeout(() => {
+            this.broadcast({
+              type: 'REQUEST_ROOM_SYNC',
+              senderName: this.userName,
+              senderTeamId: this.userTeamId
+            });
+          }, 300);
+        }
+      };
+
+      this.ws.onmessage = (event) => {
         try {
-          const raw = localStorage.getItem(`sports_auction_room_${this.roomCode}`);
-          if (raw) {
-            const parsed = JSON.parse(raw);
-            if (parsed && parsed.claimedTeams) {
-              this.notifyListeners({
-                type: 'HEARTBEAT_SYNC',
-                room: parsed
-              });
+          const raw = JSON.parse(event.data);
+          if (raw.event === 'message' && raw.message) {
+            if (raw.id && raw.id === this.lastProcessedMessageId) return;
+            this.lastProcessedMessageId = raw.id;
+
+            const data = JSON.parse(raw.message);
+            if (data.senderId !== this.clientId) {
+              this.notifyListeners(data);
+            }
+          }
+        } catch (err) {
+          // Ignore non-json messages (e.g. keepalives)
+        }
+      };
+
+      this.ws.onerror = (err) => {
+        console.warn('[Multiplayer Relay] WS Notice, trying SSE fallback:', err);
+        this.fallbackToSSE(topic);
+      };
+
+      this.ws.onclose = () => {
+        // Auto-reconnect if closed unexpectedly
+        if (this.roomCode) {
+          this.reconnectTimer = setTimeout(() => {
+            this.connectCloudRelay();
+          }, 3000);
+        }
+      };
+    } catch (e) {
+      this.fallbackToSSE(topic);
+    }
+  }
+
+  // Server-Sent Events fallback for mobile browsers where WebSocket might be closed in background
+  fallbackToSSE(topic) {
+    if (typeof window === 'undefined' || !window.EventSource || this.sse) return;
+
+    try {
+      this.sse = new EventSource(`https://ntfy.sh/${topic}/sse`);
+      this.sse.onmessage = (event) => {
+        try {
+          const raw = JSON.parse(event.data);
+          if (raw.event === 'message' && raw.message) {
+            if (raw.id && raw.id === this.lastProcessedMessageId) return;
+            this.lastProcessedMessageId = raw.id;
+
+            const data = JSON.parse(raw.message);
+            if (data.senderId !== this.clientId) {
+              this.notifyListeners(data);
             }
           }
         } catch (e) {}
-      }, 1200);
-    }
-
-    // 4. Setup PeerJS for WebRTC remote friend connections
-    this.initPeerJS();
-  }
-
-  initPeerJS() {
-    if (typeof window === 'undefined' || !window.Peer) return;
-
-    try {
-      const sanitizedRoom = this.roomCode.toLowerCase().replace(/[^a-z0-9]/g, '');
-      const peerId = this.isHost
-        ? `sa-${sanitizedRoom}-host`
-        : `sa-${sanitizedRoom}-${Math.random().toString(36).substr(2, 6)}`;
-
-      this.peer = new window.Peer(peerId, {
-        debug: 1,
-        config: {
-          iceServers: [
-            { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:global.stun.twilio.com:3478' }
-          ]
-        }
-      });
-
-      if (this.isHost) {
-        this.peer.on('connection', (conn) => {
-          this.connections.push(conn);
-
-          conn.on('data', (data) => {
-            this.notifyListeners(data);
-            this.broadcastToGuests(data, conn);
-          });
-
-          conn.on('close', () => {
-            this.connections = this.connections.filter(c => c !== conn);
-          });
-        });
-
-        this.peer.on('error', (err) => {
-          console.warn('[Multiplayer] Host Peer notice:', err?.type);
-        });
-      } else {
-        this.peer.on('open', () => {
-          const targetHostId = `sa-${sanitizedRoom}-host`;
-          const conn = this.peer.connect(targetHostId, { reliable: true });
-          this.hostConnection = conn;
-
-          conn.on('open', () => {
-            conn.send({
-              type: 'REQUEST_ROOM_SYNC',
-              sender: { name: this.userName, teamId: this.userTeamId }
-            });
-          });
-
-          conn.on('data', (data) => {
-            this.notifyListeners(data);
-          });
-
-          conn.on('error', (err) => {
-            console.warn('[Multiplayer] Connection to host notice:', err?.type);
-          });
-        });
-
-        this.peer.on('error', (err) => {
-          console.warn('[Multiplayer] Guest Peer notice:', err?.type);
-        });
-      }
-    } catch (e) {
-      console.warn('[Multiplayer] PeerJS initialization skipped:', e);
-    }
-  }
-
-  broadcastToGuests(data, excludeConn = null) {
-    this.connections.forEach(conn => {
-      if (conn !== excludeConn && conn.open) {
-        try {
-          conn.send(data);
-        } catch (e) {
-          console.warn('Error sending to guest:', e);
-        }
-      }
-    });
+      };
+    } catch (e) {}
   }
 
   handleStorageEvent = (e) => {
     if (e.key === `sports_auction_sync_${this.roomCode}` && e.newValue) {
       try {
         const payload = JSON.parse(e.newValue);
-        if (payload.timestamp !== this.lastProcessedSyncTime) {
+        if (payload.senderId !== this.clientId) {
           this.notifyListeners(payload);
         }
-      } catch (err) {
-        console.warn('Storage sync parse error:', err);
-      }
+      } catch (err) {}
     }
   };
 
-  // Broadcast an action to all connected participants
+  // Broadcast an action to all connected participants (Mobile + PC + Tabs)
   broadcast(action) {
-    const timestamp = Date.now();
-    this.lastProcessedSyncTime = timestamp;
-
     const payload = {
       ...action,
       roomCode: this.roomCode,
+      senderId: this.clientId,
       senderTeamId: this.userTeamId,
       senderName: this.userName,
-      timestamp
+      timestamp: Date.now()
     };
 
-    // 1. BroadcastChannel (local tabs)
+    // 1. BroadcastChannel (local tabs on same browser)
     if (this.channel) {
-      try {
-        this.channel.postMessage(payload);
-      } catch (e) {
-        console.warn('BroadcastChannel send error:', e);
-      }
+      try { this.channel.postMessage(payload); } catch (e) {}
     }
 
     // 2. LocalStorage trigger
@@ -183,15 +162,16 @@ class MultiplayerManager {
       } catch (e) {}
     }
 
-    // 3. WebRTC P2P
-    if (this.isHost) {
-      this.broadcastToGuests(payload);
-    } else if (this.hostConnection && this.hostConnection.open) {
-      try {
-        this.hostConnection.send(payload);
-      } catch (e) {
-        console.warn('WebRTC send to host error:', e);
-      }
+    // 3. Global Cloud Relay (Phone <-> PC cross-device over internet)
+    const topic = `sports-auction-${this.roomCode.toLowerCase().replace(/[^a-z0-9]/g, '')}`;
+    try {
+      fetch(`https://ntfy.sh/${topic}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      }).catch(() => {});
+    } catch (e) {
+      console.warn('Relay publish error:', e);
     }
   }
 
@@ -210,7 +190,7 @@ class MultiplayerManager {
     });
   }
 
-  // Save room snapshot to localStorage so guests in same browser/LAN can read initial info
+  // Save room snapshot to localStorage so local guests can read initial info
   saveRoomSnapshot(roomData) {
     if (!this.roomCode || typeof window === 'undefined') return;
     try {
@@ -229,30 +209,24 @@ class MultiplayerManager {
   }
 
   cleanup() {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     if (this.channel) {
       try { this.channel.close(); } catch (e) {}
       this.channel = null;
     }
-    if (this.pollInterval) {
-      clearInterval(this.pollInterval);
-      this.pollInterval = null;
-    }
     if (typeof window !== 'undefined') {
       window.removeEventListener('storage', this.handleStorageEvent);
     }
-    if (this.connections.length > 0) {
-      this.connections.forEach(c => {
-        try { c.close(); } catch (e) {}
-      });
-      this.connections = [];
+    if (this.ws) {
+      try { this.ws.close(); } catch (e) {}
+      this.ws = null;
     }
-    if (this.hostConnection) {
-      try { this.hostConnection.close(); } catch (e) {}
-      this.hostConnection = null;
-    }
-    if (this.peer) {
-      try { this.peer.destroy(); } catch (e) {}
-      this.peer = null;
+    if (this.sse) {
+      try { this.sse.close(); } catch (e) {}
+      this.sse = null;
     }
     this.listeners.clear();
   }
