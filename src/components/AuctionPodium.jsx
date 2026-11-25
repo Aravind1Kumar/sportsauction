@@ -25,6 +25,9 @@ export default function AuctionPodium({
   userTeam,
   timer,
   maxTimer,
+  roundState = 'bidding', // 'ready' | 'bidding' | 'sold'
+  onStartRound,
+  isHost = true,
   isPaused,
   isStriking,
   callOutText,
@@ -398,9 +401,22 @@ export default function AuctionPodium({
               </div>
             )}
 
-            {/* Primary BID Button */}
+            {/* Primary BID / Action Button */}
             <div className="mt-5">
-              {isUserHighestBidder ? (
+              {roundState === 'ready' ? (
+                <div className="space-y-2">
+                  <button
+                    onClick={onStartRound}
+                    className="w-full py-4 px-4 bg-gradient-to-r from-amber-500 via-yellow-400 to-amber-600 hover:from-amber-400 text-slate-950 font-black text-base uppercase rounded-2xl shadow-[0_10px_25px_rgba(234,179,8,0.4)] transition-all flex items-center justify-center gap-2 transform hover:scale-[1.02] active:scale-[0.98] cursor-pointer"
+                  >
+                    <Play className="w-5 h-5 fill-slate-950" />
+                    <span>Open Bidding for {player.name} 🔨</span>
+                  </button>
+                  <p className="text-[11px] text-center text-slate-400">
+                    Base Price: <strong className="text-amber-400">{formatMoney(player.basePrice)}</strong> • Review stats & open bidding when ready!
+                  </p>
+                </div>
+              ) : isUserHighestBidder ? (
                 <div className="w-full py-4 px-4 bg-emerald-500/20 border-2 border-emerald-500 text-emerald-300 rounded-2xl text-center font-black text-base flex items-center justify-center gap-2">
                   <Shield className="w-5 h-5 text-emerald-400" />
                   <span>You Hold the Highest Bid!</span>

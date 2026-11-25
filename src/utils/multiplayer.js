@@ -1,4 +1,4 @@
-// Global Cross-Device & Cross-Tab Real-Time Synchronizer for Sports Auction
+// Global Two-Way State Sync & Real-Time Cloud Relay for Sports Auction
 
 class MultiplayerManager {
   constructor() {
@@ -9,9 +9,9 @@ class MultiplayerManager {
     this.clientId = 'client_' + Math.random().toString(36).substr(2, 9);
     this.channel = null;
     this.ws = null;
-    this.sse = null;
-    this.reconnectTimer = null;
     this.pollTimer = null;
+    this.heartbeatTimer = null;
+    this.reconnectTimer = null;
     this.listeners = new Set();
     this.lastProcessedMessageId = null;
   }
@@ -24,7 +24,7 @@ class MultiplayerManager {
     this.userTeamId = userTeamId;
     this.userName = userName;
 
-    // 1. Setup local BroadcastChannel (instant zero-latency for same-browser tabs)
+    // 1. Setup local BroadcastChannel (for same-computer tabs)
     if (typeof window !== 'undefined' && window.BroadcastChannel) {
       try {
         this.channel = new BroadcastChannel(`sports_auction_${this.roomCode}`);
@@ -43,7 +43,7 @@ class MultiplayerManager {
       window.addEventListener('storage', this.handleStorageEvent);
     }
 
-    // 3. Setup Global Cloud Relay (Phone <-> PC cross-device WebSocket & SSE)
+    // 3. Connect to Global Cloud Relay (Phone <-> PC cross-device)
     this.connectCloudRelay();
   }
 
@@ -53,21 +53,20 @@ class MultiplayerManager {
     const topic = `sports-auction-${this.roomCode.toLowerCase().replace(/[^a-z0-9]/g, '')}`;
     const wsUrl = `wss://ntfy.sh/${topic}/ws`;
 
+    // Connect WebSocket
     try {
       this.ws = new WebSocket(wsUrl);
 
       this.ws.onopen = () => {
         console.log('[Multiplayer Relay] Connected for room:', this.roomCode);
 
-        // When a guest joins, immediately request authoritative room state from host
+        // Guest immediately signals presence to host upon connection
         if (!this.isHost) {
-          setTimeout(() => {
-            this.broadcast({
-              type: 'REQUEST_ROOM_SYNC',
-              senderName: this.userName,
-              senderTeamId: this.userTeamId
-            });
-          }, 300);
+          this.broadcast({
+            type: 'GUEST_HEARTBEAT',
+            teamId: this.userTeamId,
+            ownerName: this.userName
+          });
         }
       };
 
@@ -83,29 +82,19 @@ class MultiplayerManager {
               this.notifyListeners(data);
             }
           }
-        } catch (err) {
-          // Ignore non-json messages (e.g. keepalives)
-        }
-      };
-
-      this.ws.onerror = (err) => {
-        console.warn('[Multiplayer Relay] WS Notice, trying SSE fallback:', err);
-        this.fallbackToSSE(topic);
+        } catch (err) {}
       };
 
       this.ws.onclose = () => {
-        // Auto-reconnect if closed unexpectedly
         if (this.roomCode) {
-          this.reconnectTimer = setTimeout(() => {
-            this.connectCloudRelay();
-          }, 3000);
+          this.reconnectTimer = setTimeout(() => this.connectCloudRelay(), 3000);
         }
       };
-    } catch (e) {
-      this.fallbackToSSE(topic);
-    }
 
-    // Polling fallback every 1.5s to guarantee 100% reliable cross-device sync even on mobile networks
+      this.ws.onerror = () => {};
+    } catch (e) {}
+
+    // 4. Background HTTP Polling (every 1.5s) to guarantee zero message loss on mobile browsers
     if (this.pollTimer) clearInterval(this.pollTimer);
     this.pollTimer = setInterval(async () => {
       if (!this.roomCode) return;
@@ -133,27 +122,32 @@ class MultiplayerManager {
     }, 1500);
   }
 
-  // Server-Sent Events fallback for mobile browsers where WebSocket might be closed in background
-  fallbackToSSE(topic) {
-    if (typeof window === 'undefined' || !window.EventSource || this.sse) return;
+  // Start two-way continuous heartbeat to ensure mobile & PC always see each other
+  startHeartbeat(getStateCallback) {
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
 
-    try {
-      this.sse = new EventSource(`https://ntfy.sh/${topic}/sse`);
-      this.sse.onmessage = (event) => {
-        try {
-          const raw = JSON.parse(event.data);
-          if (raw.event === 'message' && raw.message) {
-            if (raw.id && raw.id === this.lastProcessedMessageId) return;
-            this.lastProcessedMessageId = raw.id;
-
-            const data = JSON.parse(raw.message);
-            if (data.senderId !== this.clientId) {
-              this.notifyListeners(data);
-            }
-          }
-        } catch (e) {}
-      };
-    } catch (e) {}
+    this.heartbeatTimer = setInterval(() => {
+      if (!this.roomCode) return;
+      try {
+        const state = getStateCallback ? getStateCallback() : null;
+        if (this.isHost && state) {
+          this.broadcast({
+            type: 'HOST_HEARTBEAT',
+            room: state.room,
+            screen: state.screen,
+            roundState: state.roundState,
+            currentPrice: state.currentPrice,
+            highestBidder: state.highestBidder
+          });
+        } else if (!this.isHost) {
+          this.broadcast({
+            type: 'GUEST_HEARTBEAT',
+            teamId: this.userTeamId,
+            ownerName: this.userName
+          });
+        }
+      } catch (e) {}
+    }, 2000);
   }
 
   handleStorageEvent = (e) => {
@@ -178,7 +172,7 @@ class MultiplayerManager {
       timestamp: Date.now()
     };
 
-    // 1. BroadcastChannel (local tabs on same browser)
+    // 1. BroadcastChannel (local tabs on same computer)
     if (this.channel) {
       try { this.channel.postMessage(payload); } catch (e) {}
     }
@@ -237,6 +231,10 @@ class MultiplayerManager {
   }
 
   cleanup() {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
     if (this.pollTimer) {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
@@ -255,10 +253,6 @@ class MultiplayerManager {
     if (this.ws) {
       try { this.ws.close(); } catch (e) {}
       this.ws = null;
-    }
-    if (this.sse) {
-      try { this.sse.close(); } catch (e) {}
-      this.sse = null;
     }
     this.listeners.clear();
   }

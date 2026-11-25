@@ -53,7 +53,9 @@ export default function App() {
   const [pool, setPool] = useState([]);
   const [currentIndex, setCurrentIndex] = useState(0);
 
-  // Auction State
+  // Auction & Round State
+  // roundState: 'ready' (waiting to open bidding on player) | 'bidding' (live timer) | 'sold' (celebration modal open)
+  const [roundState, setRoundState] = useState('ready');
   const [currentPrice, setCurrentPrice] = useState(0);
   const [highestBidder, setHighestBidder] = useState(null);
   const [bidHistory, setBidHistory] = useState([]);
@@ -77,6 +79,16 @@ export default function App() {
   isHostRef.current = isHost;
   const roomRef = useRef(room);
   roomRef.current = room;
+  const screenRef = useRef(screen);
+  screenRef.current = screen;
+  const roundStateRef = useRef(roundState);
+  roundStateRef.current = roundState;
+  const currentPriceRef = useRef(currentPrice);
+  currentPriceRef.current = currentPrice;
+  const highestBidderRef = useRef(highestBidder);
+  highestBidderRef.current = highestBidder;
+  const soldCelebrationRef = useRef(soldCelebration);
+  soldCelebrationRef.current = soldCelebration;
   const currentIndexRef = useRef(currentIndex);
   currentIndexRef.current = currentIndex;
 
@@ -105,18 +117,34 @@ export default function App() {
     }
   }, [room?.code, screen]);
 
+  // Start two-way continuous state sync heartbeat
+  useEffect(() => {
+    if (!room?.code || screen === 'lobby') return;
+
+    multiplayer.startHeartbeat(() => ({
+      room: roomRef.current,
+      screen: screenRef.current,
+      roundState: roundStateRef.current,
+      currentPrice: currentPriceRef.current,
+      highestBidder: highestBidderRef.current
+    }));
+  }, [room?.code, screen]);
+
   // Handle Multiplayer Incoming Messages
   useEffect(() => {
     const unsubscribe = multiplayer.subscribe((action) => {
       if (!action || !action.type) return;
 
       switch (action.type) {
+        case 'GUEST_HEARTBEAT':
         case 'PLAYER_JOINED': {
           const { teamId, ownerName } = action;
-          const team = TEAMS.find(t => t.id === teamId);
-          const teamLabel = team ? team.shortName : teamId;
+          if (!teamId) break;
 
           setRoom(prev => {
+            if (prev.claimedTeams && prev.claimedTeams[teamId]?.name === ownerName) {
+              return prev;
+            }
             const updated = {
               ...prev,
               claimedTeams: {
@@ -126,51 +154,65 @@ export default function App() {
             };
             if (isHostRef.current) {
               multiplayer.saveRoomSnapshot(updated);
-              // Host broadcasts authoritative state back to new guest
               multiplayer.broadcast({
-                type: 'SYNC_ROOM_STATE',
-                room: updated
+                type: 'HOST_HEARTBEAT',
+                room: updated,
+                screen: screenRef.current,
+                roundState: roundStateRef.current
               });
             }
             return updated;
           });
 
-          setChatMessages(prev => [
-            ...prev,
-            { sender: 'System', text: `🎉 ${ownerName} joined the room as ${teamLabel}!`, time: 'Now' }
-          ]);
+          const team = TEAMS.find(t => t.id === teamId);
+          const teamLabel = team ? team.shortName : teamId;
+          setChatMessages(prev => {
+            const alreadyLogged = prev.some(m => m.text?.includes(ownerName));
+            if (alreadyLogged) return prev;
+            return [
+              ...prev,
+              { sender: 'System', text: `🎉 ${ownerName} joined the room as ${teamLabel}!`, time: 'Now' }
+            ];
+          });
           sounds.playBidSound();
           break;
         }
 
+        case 'HOST_HEARTBEAT':
         case 'SYNC_ROOM_STATE': {
           if (action.room) {
             setRoom(action.room);
             if (action.room.bidTimer) {
               setMaxTimer(action.room.bidTimer);
-              setTimer(action.room.bidTimer);
             }
           }
-          break;
-        }
-
-        case 'HEARTBEAT_SYNC': {
-          if (action.room && action.room.claimedTeams) {
-            setRoom(prev => {
-              const currentCount = Object.keys(prev.claimedTeams || {}).length;
-              const incomingCount = Object.keys(action.room.claimedTeams || {}).length;
-              if (incomingCount > currentCount) {
-                sounds.playBidSound();
-                return {
-                  ...prev,
-                  claimedTeams: {
-                    ...prev.claimedTeams,
-                    ...action.room.claimedTeams
-                  }
-                };
-              }
-              return prev;
+          // If host has launched auction, transition guest automatically!
+          if (action.screen === 'auction' && screenRef.current === 'waiting') {
+            const isMini = action.room?.gameMode === 'mini';
+            const initializedTeams = TEAMS.map(t => {
+              const claimed = action.room?.claimedTeams ? action.room.claimedTeams[t.id] : null;
+              const teamPurse = isMini ? t.mini2026Purse : (action.room?.startingPurse || 120.0);
+              return {
+                ...t,
+                startingPurse: teamPurse,
+                purse: teamPurse,
+                squad: [],
+                overseasCount: 0,
+                ownerName: claimed ? claimed.name : `Bot (${t.shortName})`
+              };
             });
+            setTeams(initializedTeams);
+            setPool([...PLAYERS]);
+            setCurrentIndex(0);
+            setCurrentPrice(0);
+            setHighestBidder(null);
+            setBidHistory([]);
+            setScreen('auction');
+            setRoundState('ready');
+            setIsPaused(false);
+          }
+          if (action.roundState && action.roundState !== roundStateRef.current) {
+            setRoundState(action.roundState);
           }
           break;
         }
@@ -178,8 +220,10 @@ export default function App() {
         case 'REQUEST_ROOM_SYNC': {
           if (isHostRef.current) {
             multiplayer.broadcast({
-              type: 'SYNC_ROOM_STATE',
-              room: roomRef.current
+              type: 'HOST_HEARTBEAT',
+              room: roomRef.current,
+              screen: screenRef.current,
+              roundState: roundStateRef.current
             });
           }
           break;
@@ -216,31 +260,60 @@ export default function App() {
           setHighestBidder(null);
           setBidHistory([]);
           setScreen('auction');
+          setRoundState('ready');
           setIsPaused(false);
           sounds.playGavelStrike();
           break;
         }
 
+        case 'START_ROUND': {
+          setRoundState('bidding');
+          setTimer(maxTimer);
+          sounds.playGavelStrike();
+          break;
+        }
+
         case 'PLACE_BID': {
-          // Process remote bid
           placeBid(action.teamId, true);
           break;
         }
 
         case 'ROUND_RESULT': {
           if (!isHostRef.current) {
+            setRoundState('sold');
             if (action.wasSold && action.winner) {
               sounds.playSoldFanfare();
               setSoldCelebration({
                 player: pool[action.playerIndex] || currentPlayer,
                 winningTeam: action.winner,
-                soldPrice: action.soldPrice
+                soldPrice: action.soldPrice,
+                wasSold: true
               });
-              moveToNextPlayer(true, action.soldPrice, action.winner);
             } else {
               sounds.playUnsoldTone();
-              moveToNextPlayer(false);
+              setSoldCelebration({
+                player: pool[action.playerIndex] || currentPlayer,
+                winningTeam: null,
+                soldPrice: 0,
+                wasSold: false
+              });
             }
+          }
+          break;
+        }
+
+        case 'NEXT_PLAYER_ROUND': {
+          if (!isHostRef.current) {
+            if (soldCelebrationRef.current) {
+              moveToNextPlayer(
+                soldCelebrationRef.current.wasSold,
+                soldCelebrationRef.current.soldPrice,
+                soldCelebrationRef.current.winningTeam
+              );
+            }
+            setSoldCelebration(null);
+            setRoundState('ready');
+            setTimer(maxTimer);
           }
           break;
         }
@@ -256,7 +329,7 @@ export default function App() {
     });
 
     return () => unsubscribe();
-  }, [pool, currentPlayer]);
+  }, [pool, currentPlayer, maxTimer]);
 
   // Handle Create Room
   const handleCreateRoom = ({ code, teamId, ownerName, visibility, startingPurse, bidTimer, gameMode, modeName }) => {
@@ -284,7 +357,7 @@ export default function App() {
     multiplayer.saveRoomSnapshot(newRoom);
 
     setChatMessages([
-      { sender: 'System', text: `Room ${code} created! Share the link with friends to play together.`, time: 'Just now' }
+      { sender: 'System', text: `Room ${code} created! Share the code or direct link with friends.`, time: 'Just now' }
     ]);
 
     setScreen('waiting');
@@ -338,7 +411,6 @@ export default function App() {
     delete currentClaimed[userTeamId];
     currentClaimed[newTeamId] = myInfo;
 
-    const nextRoom = { ...prevRoom => ({ ...prevRoom, claimedTeams: currentClaimed }) };
     setRoom(prev => ({ ...prev, claimedTeams: currentClaimed }));
     setUserTeamId(newTeamId);
 
@@ -395,14 +467,25 @@ export default function App() {
     setHighestBidder(null);
     setBidHistory([]);
     setScreen('auction');
+    setRoundState('ready'); // Start in ready state, waiting for host to open bidding!
     setIsPaused(false);
 
-    // Broadcast to guests so they join the arena together!
+    // Broadcast to guests so they enter the arena together!
     multiplayer.broadcast({
       type: 'START_AUCTION',
       teams: initializedTeams,
       pool: PLAYERS,
       gameMode: room.gameMode
+    });
+  };
+
+  // Open Bidding Round for current player
+  const handleStartRound = () => {
+    setRoundState('bidding');
+    setTimer(maxTimer);
+    sounds.playGavelStrike();
+    multiplayer.broadcast({
+      type: 'START_ROUND'
     });
   };
 
@@ -441,6 +524,11 @@ export default function App() {
   const placeBid = (teamId, isRemote = false) => {
     if (isPaused || !currentPlayer) return;
 
+    // If still in ready state, automatically transition to bidding on first bid
+    if (roundState !== 'bidding') {
+      setRoundState('bidding');
+    }
+
     const biddingTeam = teams.find(t => t.id === teamId);
     if (!biddingTeam) return;
 
@@ -474,7 +562,13 @@ export default function App() {
   const handlePassPlayer = () => {
     if (!currentPlayer || !isHost) return;
     sounds.playUnsoldTone();
-    moveToNextPlayer(false);
+    setSoldCelebration({
+      player: currentPlayer,
+      winningTeam: null,
+      soldPrice: 0,
+      wasSold: false
+    });
+    setRoundState('sold');
     multiplayer.broadcast({
       type: 'ROUND_RESULT',
       wasSold: false,
@@ -525,6 +619,21 @@ export default function App() {
     setCurrentIndex(prev => prev + 1);
   };
 
+  // Advance to Next Player from Celebration Modal
+  const handleCloseCelebration = () => {
+    if (soldCelebration) {
+      moveToNextPlayer(soldCelebration.wasSold, soldCelebration.soldPrice, soldCelebration.winningTeam);
+    }
+    setSoldCelebration(null);
+    setRoundState('ready'); // Ready for next player
+    setTimer(maxTimer);
+
+    // Broadcast advance to guests
+    multiplayer.broadcast({
+      type: 'NEXT_PLAYER_ROUND'
+    });
+  };
+
   // Pause / Resume toggle
   const handleTogglePause = () => {
     const nextState = !isPaused;
@@ -535,9 +644,9 @@ export default function App() {
     });
   };
 
-  // Timer Tick Hook (Authoritative on Host)
+  // Controlled Timer Hook (Runs ONLY when roundState === 'bidding')
   useEffect(() => {
-    if (screen !== 'auction' || isPaused || !currentPlayer || soldCelebration) return;
+    if (screen !== 'auction' || roundState !== 'bidding' || isPaused || !currentPlayer || soldCelebration) return;
 
     const interval = setInterval(() => {
       setTimer(prev => {
@@ -545,14 +654,15 @@ export default function App() {
           clearInterval(interval);
           
           if (isHost) {
+            setRoundState('sold');
             if (highestBidder) {
               sounds.playSoldFanfare();
               setSoldCelebration({
                 player: currentPlayer,
                 winningTeam: highestBidder,
-                soldPrice: currentPrice
+                soldPrice: currentPrice,
+                wasSold: true
               });
-              moveToNextPlayer(true, currentPrice, highestBidder);
               multiplayer.broadcast({
                 type: 'ROUND_RESULT',
                 wasSold: true,
@@ -562,7 +672,12 @@ export default function App() {
               });
             } else {
               sounds.playUnsoldTone();
-              moveToNextPlayer(false);
+              setSoldCelebration({
+                player: currentPlayer,
+                winningTeam: null,
+                soldPrice: 0,
+                wasSold: false
+              });
               multiplayer.broadcast({
                 type: 'ROUND_RESULT',
                 wasSold: false,
@@ -593,13 +708,14 @@ export default function App() {
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [screen, isHost, isPaused, currentPlayer, currentPrice, highestBidder, soldCelebration, maxTimer, currentIndex]);
+  }, [screen, roundState, isHost, isPaused, currentPlayer, currentPrice, highestBidder, soldCelebration, maxTimer, currentIndex]);
 
-  // AI Franchise Bots Simulation Hook (Authoritative: Only Host simulates bots!)
+  // AI Franchise Bots Simulation Hook (Paced realistically: runs ONLY during 'bidding' with 3.5s-6s delay!)
   useEffect(() => {
-    if (screen !== 'auction' || !isHost || isPaused || !currentPlayer || soldCelebration) return;
+    if (screen !== 'auction' || roundState !== 'bidding' || !isHost || isPaused || !currentPlayer || soldCelebration) return;
 
-    const delay = Math.random() * 1400 + 800;
+    // Give human players comfortable 3.5s to 6.5s thinking and bidding window!
+    const delay = Math.random() * 3000 + 3500;
     const timeout = setTimeout(() => {
       const eligibleBots = teams.filter(t => {
         const isHuman = room.claimedTeams && room.claimedTeams[t.id];
@@ -616,7 +732,7 @@ export default function App() {
     }, delay);
 
     return () => clearTimeout(timeout);
-  }, [screen, isHost, isPaused, currentPlayer, currentPrice, highestBidder, soldCelebration, teams, room.claimedTeams]);
+  }, [screen, roundState, isHost, isPaused, currentPlayer, currentPrice, highestBidder, soldCelebration, teams, room.claimedTeams]);
 
   // SCREEN 1: ROOM CREATION & LOBBY
   if (screen === 'lobby') {
@@ -648,9 +764,6 @@ export default function App() {
 
   // SCREEN 3: LIVE AUCTION ARENA
   const userTeam = teams.find(t => t.id === userTeamId);
-  const soldPlayers = pool.filter(p => p.sold);
-  const unsoldPlayers = pool.filter(p => p.unsold);
-  const upcomingPlayers = pool.slice(currentIndex + 1);
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col justify-between selection:bg-amber-500 selection:text-black">
@@ -675,6 +788,9 @@ export default function App() {
             userTeam={userTeam}
             timer={timer}
             maxTimer={maxTimer}
+            roundState={roundState}
+            onStartRound={handleStartRound}
+            isHost={isHost}
             isPaused={isPaused}
             isStriking={isStriking}
             callOutText={callOutText}
@@ -735,7 +851,7 @@ export default function App() {
           player={soldCelebration.player}
           winningTeam={soldCelebration.winningTeam}
           soldPrice={soldCelebration.soldPrice}
-          onClose={() => setSoldCelebration(null)}
+          onClose={handleCloseCelebration}
         />
       )}
 
