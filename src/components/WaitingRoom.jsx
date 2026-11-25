@@ -29,10 +29,11 @@ export default function WaitingRoom({
   onStartAuction,
   onLeaveRoom
 }) {
-  const [copied, setCopied] = useState(false);
+  const [copiedCode, setCopiedCode] = useState(false);
+  const [copiedLink, setCopiedLink] = useState(false);
   const [localChatMessages, setLocalChatMessages] = useState([
-    { sender: 'System', text: `Room ${room.code} created! Share the code or link with friends.`, time: 'Just now' },
-    { sender: 'Bot (MI)', text: 'Mumbai Indians are ready for the bidding war!', time: 'Just now' }
+    { sender: 'System', text: `Room ${room.code} is open! Share the code or invite link with your friends to play together.`, time: 'Just now' },
+    { sender: 'System', text: 'Waiting for players to join and claim their franchises...', time: 'Just now' }
   ]);
   const [inputText, setInputText] = useState('');
   const [fillBots, setFillBots] = useState(true);
@@ -43,14 +44,20 @@ export default function WaitingRoom({
   const pathname = typeof window !== 'undefined' ? window.location.pathname : '/';
   const inviteLink = `${origin}${pathname}?room=${room.code}`;
 
+  const handleCopyCode = () => {
+    navigator.clipboard.writeText(room.code);
+    setCopiedCode(true);
+    setTimeout(() => setCopiedCode(false), 2000);
+  };
+
   const handleCopyLink = () => {
     navigator.clipboard.writeText(inviteLink);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    setCopiedLink(true);
+    setTimeout(() => setCopiedLink(false), 2000);
   };
 
   const handleShareWhatsApp = () => {
-    const text = `Join my IPL Sports Auction room on Sports Auction! Room Code: ${room.code} Link: ${inviteLink}`;
+    const text = `Join my IPL Sports Auction room! Room Code: ${room.code} \nClick to join directly: ${inviteLink}`;
     window.open(`https://api.whatsapp.com/send?text=${encodeURIComponent(text)}`, '_blank');
   };
 
@@ -73,7 +80,8 @@ export default function WaitingRoom({
     setInputText('');
   };
 
-  const claimedCount = room.claimedTeams ? Object.keys(room.claimedTeams).length : 1;
+  const humanPlayersCount = room.claimedTeams ? Object.keys(room.claimedTeams).length : 1;
+  const claimedCount = humanPlayersCount;
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col justify-between">
@@ -102,13 +110,22 @@ export default function WaitingRoom({
         </div>
 
         {/* Share & Invite Buttons */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            onClick={handleCopyCode}
+            className="px-3.5 py-2 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 font-black text-xs flex items-center gap-2 border border-amber-500/40 transition-all shadow"
+            title="Copy 6-Character Room Code"
+          >
+            {copiedCode ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4 text-amber-400" />}
+            <span>{copiedCode ? 'Code Copied!' : `Code: ${room.code}`}</span>
+          </button>
+
           <button
             onClick={handleCopyLink}
             className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs flex items-center gap-2 border border-slate-700 transition-all shadow"
           >
-            {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4 text-amber-400" />}
-            <span>{copied ? 'Link Copied!' : 'Copy Invite Link'}</span>
+            {copiedLink ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4 text-amber-400" />}
+            <span>{copiedLink ? 'Link Copied!' : 'Copy Direct Link'}</span>
           </button>
 
           <button
@@ -243,18 +260,52 @@ export default function WaitingRoom({
               />
             </div>
 
-            {/* Start Button */}
+            {/* Start Button & Player Count Guard */}
             {isHost ? (
-              <button
-                onClick={() => onStartAuction({ fillBots })}
-                className="w-full py-4 px-4 bg-gradient-to-r from-emerald-500 via-teal-500 to-emerald-600 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-black text-base uppercase rounded-2xl shadow-[0_10px_25px_rgba(16,185,129,0.35)] transition-all flex items-center justify-center gap-2 transform hover:scale-[1.02] active:scale-[0.98]"
-              >
-                <Play className="w-5 h-5 fill-slate-950" />
-                <span>Start Auction Now 🔨</span>
-              </button>
+              <div className="space-y-3">
+                {humanPlayersCount < 2 ? (
+                  <>
+                    <div className="p-3.5 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-xs">
+                      <div className="flex items-center gap-2 text-amber-300 font-black mb-1">
+                        <Users className="w-4 h-4 animate-pulse" />
+                        <span>Waiting for Friends to Join</span>
+                      </div>
+                      <p className="text-slate-300 text-[11px] leading-relaxed">
+                        Share room code <strong className="text-amber-400 font-mono text-xs">{room.code}</strong> with your friend.
+                        When they join, their name will appear on the table.
+                      </p>
+                    </div>
+
+                    <div className="w-full py-3 px-4 bg-slate-950 text-slate-400 font-black text-xs uppercase rounded-2xl border border-slate-800 flex items-center justify-center gap-2 text-center cursor-not-allowed">
+                      <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
+                      <span>Waiting for Players ({humanPlayersCount}/10 Joined)</span>
+                    </div>
+
+                    <button
+                      onClick={() => onStartAuction({ fillBots: true })}
+                      className="w-full py-2.5 px-3 bg-slate-800/80 hover:bg-slate-800 hover:text-amber-300 text-slate-400 font-bold text-xs rounded-xl border border-slate-700/60 transition-all flex items-center justify-center gap-2"
+                    >
+                      <Bot className="w-3.5 h-3.5 text-cyan-400" />
+                      <span>Start Solo Practice with 9 AI Bots</span>
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    onClick={() => onStartAuction({ fillBots })}
+                    className="w-full py-4 px-4 bg-gradient-to-r from-emerald-500 via-teal-500 to-emerald-600 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-black text-base uppercase rounded-2xl shadow-[0_10px_25px_rgba(16,185,129,0.35)] transition-all flex items-center justify-center gap-2 transform hover:scale-[1.02] active:scale-[0.98]"
+                  >
+                    <Play className="w-5 h-5 fill-slate-950" />
+                    <span>Start Multiplayer Auction ({humanPlayersCount} Ready) 🔨</span>
+                  </button>
+                )}
+              </div>
             ) : (
-              <div className="text-center py-3 bg-slate-950/60 rounded-2xl border border-slate-800 text-xs text-slate-400">
-                ⏳ Waiting for room host to start the auction...
+              <div className="text-center py-4 px-3 bg-slate-950/80 rounded-2xl border border-slate-800 text-xs text-slate-300 space-y-1">
+                <div className="font-black text-amber-400 flex items-center justify-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+                  <span>Connected to Room {room.code}</span>
+                </div>
+                <p className="text-[11px] text-slate-400">Waiting for room host to start the auction arena...</p>
               </div>
             )}
           </div>

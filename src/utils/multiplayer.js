@@ -1,4 +1,4 @@
-// Real-Time Cross-Tab and P2P Multiplayer Synchronizer for Sports Auction
+// Real-Time Cross-Tab, Local-Storage and P2P Multiplayer Synchronizer for Sports Auction
 
 class MultiplayerManager {
   constructor() {
@@ -8,9 +8,11 @@ class MultiplayerManager {
     this.userName = '';
     this.channel = null;
     this.peer = null;
-    this.connections = []; // For host: list of guest connections
-    this.hostConnection = null; // For guest: connection to host
+    this.connections = [];
+    this.hostConnection = null;
     this.listeners = new Set();
+    this.pollInterval = null;
+    this.lastProcessedSyncTime = 0;
   }
 
   // Initialize room sync
@@ -26,7 +28,7 @@ class MultiplayerManager {
       try {
         this.channel = new BroadcastChannel(`sports_auction_${this.roomCode}`);
         this.channel.onmessage = (event) => {
-          if (event.data) {
+          if (event.data && event.data.timestamp !== this.lastProcessedSyncTime) {
             this.notifyListeners(event.data);
           }
         };
@@ -38,9 +40,25 @@ class MultiplayerManager {
     // 2. Setup localStorage storage event listener
     if (typeof window !== 'undefined') {
       window.addEventListener('storage', this.handleStorageEvent);
+
+      // 3. Fallback Heartbeat Poller (checks localStorage every 1.2s for room state updates)
+      this.pollInterval = setInterval(() => {
+        try {
+          const raw = localStorage.getItem(`sports_auction_room_${this.roomCode}`);
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            if (parsed && parsed.claimedTeams) {
+              this.notifyListeners({
+                type: 'HEARTBEAT_SYNC',
+                room: parsed
+              });
+            }
+          }
+        } catch (e) {}
+      }, 1200);
     }
 
-    // 3. Setup PeerJS for WebRTC remote friend connections (if window.Peer is available)
+    // 4. Setup PeerJS for WebRTC remote friend connections
     this.initPeerJS();
   }
 
@@ -48,26 +66,27 @@ class MultiplayerManager {
     if (typeof window === 'undefined' || !window.Peer) return;
 
     try {
-      const peerIdPrefix = `sports-auction-${this.roomCode.toLowerCase()}`;
-      
+      const sanitizedRoom = this.roomCode.toLowerCase().replace(/[^a-z0-9]/g, '');
+      const peerId = this.isHost
+        ? `sa-${sanitizedRoom}-host`
+        : `sa-${sanitizedRoom}-${Math.random().toString(36).substr(2, 6)}`;
+
+      this.peer = new window.Peer(peerId, {
+        debug: 1,
+        config: {
+          iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:global.stun.twilio.com:3478' }
+          ]
+        }
+      });
+
       if (this.isHost) {
-        // Host uses a deterministic ID so guests can find it
-        // Add random suffix to avoid collision if previous session hung, but try fixed ID first
-        this.peer = new window.Peer(peerIdPrefix, {
-          debug: 1
-        });
-
-        this.peer.on('open', (id) => {
-          console.log('[Multiplayer] Host Peer opened with ID:', id);
-        });
-
         this.peer.on('connection', (conn) => {
-          console.log('[Multiplayer] Guest connected to host:', conn.peer);
           this.connections.push(conn);
 
           conn.on('data', (data) => {
             this.notifyListeners(data);
-            // Host echoes message to all other guests
             this.broadcastToGuests(data, conn);
           });
 
@@ -77,23 +96,15 @@ class MultiplayerManager {
         });
 
         this.peer.on('error', (err) => {
-          console.warn('[Multiplayer] Host Peer error (likely ID in use):', err);
-          // If ID is already taken, try random ID and rely on broadcast
+          console.warn('[Multiplayer] Host Peer notice:', err?.type);
         });
       } else {
-        // Guest connects to Host
-        this.peer = new window.Peer({
-          debug: 1
-        });
-
         this.peer.on('open', () => {
-          console.log('[Multiplayer] Guest Peer opened, connecting to host:', peerIdPrefix);
-          const conn = this.peer.connect(peerIdPrefix, { reliable: true });
+          const targetHostId = `sa-${sanitizedRoom}-host`;
+          const conn = this.peer.connect(targetHostId, { reliable: true });
           this.hostConnection = conn;
 
           conn.on('open', () => {
-            console.log('[Multiplayer] Connected to host via WebRTC!');
-            // Request room sync
             conn.send({
               type: 'REQUEST_ROOM_SYNC',
               sender: { name: this.userName, teamId: this.userTeamId }
@@ -105,12 +116,12 @@ class MultiplayerManager {
           });
 
           conn.on('error', (err) => {
-            console.warn('[Multiplayer] Connection to host error:', err);
+            console.warn('[Multiplayer] Connection to host notice:', err?.type);
           });
         });
 
         this.peer.on('error', (err) => {
-          console.warn('[Multiplayer] Guest Peer error:', err);
+          console.warn('[Multiplayer] Guest Peer notice:', err?.type);
         });
       }
     } catch (e) {
@@ -134,7 +145,9 @@ class MultiplayerManager {
     if (e.key === `sports_auction_sync_${this.roomCode}` && e.newValue) {
       try {
         const payload = JSON.parse(e.newValue);
-        this.notifyListeners(payload);
+        if (payload.timestamp !== this.lastProcessedSyncTime) {
+          this.notifyListeners(payload);
+        }
       } catch (err) {
         console.warn('Storage sync parse error:', err);
       }
@@ -143,12 +156,15 @@ class MultiplayerManager {
 
   // Broadcast an action to all connected participants
   broadcast(action) {
+    const timestamp = Date.now();
+    this.lastProcessedSyncTime = timestamp;
+
     const payload = {
       ...action,
       roomCode: this.roomCode,
       senderTeamId: this.userTeamId,
       senderName: this.userName,
-      timestamp: Date.now()
+      timestamp
     };
 
     // 1. BroadcastChannel (local tabs)
@@ -164,9 +180,7 @@ class MultiplayerManager {
     if (typeof window !== 'undefined') {
       try {
         localStorage.setItem(`sports_auction_sync_${this.roomCode}`, JSON.stringify(payload));
-      } catch (e) {
-        // ignore quota errors
-      }
+      } catch (e) {}
     }
 
     // 3. WebRTC P2P
@@ -201,9 +215,7 @@ class MultiplayerManager {
     if (!this.roomCode || typeof window === 'undefined') return;
     try {
       localStorage.setItem(`sports_auction_room_${this.roomCode}`, JSON.stringify(roomData));
-    } catch (e) {
-      // ignore
-    }
+    } catch (e) {}
   }
 
   getRoomSnapshot(code) {
@@ -218,10 +230,12 @@ class MultiplayerManager {
 
   cleanup() {
     if (this.channel) {
-      try {
-        this.channel.close();
-      } catch (e) {}
+      try { this.channel.close(); } catch (e) {}
       this.channel = null;
+    }
+    if (this.pollInterval) {
+      clearInterval(this.pollInterval);
+      this.pollInterval = null;
     }
     if (typeof window !== 'undefined') {
       window.removeEventListener('storage', this.handleStorageEvent);

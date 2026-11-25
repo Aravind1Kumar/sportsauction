@@ -16,6 +16,15 @@ import {
   RotateCcw
 } from 'lucide-react';
 
+function generateRoomCode() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let res = '';
+  for (let i = 0; i < 6; i++) {
+    res += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return res;
+}
+
 export default function RoomLobby({ onCreateRoom, onJoinRoom, initialRoomCode = '', existingRoomData = null }) {
   const [tab, setTab] = useState(initialRoomCode ? 'join' : 'create'); // 'create' | 'join' | 'browse'
   const [selectedTeamId, setSelectedTeamId] = useState(() => {
@@ -23,10 +32,10 @@ export default function RoomLobby({ onCreateRoom, onJoinRoom, initialRoomCode = 
       const unclaimed = TEAMS.find(t => !existingRoomData.claimedTeams[t.id]);
       if (unclaimed) return unclaimed.id;
     }
-    return 'MI';
+    return 'CSK';
   });
-  const [ownerName, setOwnerName] = useState('Challenger');
-  const [roomCode, setRoomCode] = useState('8AB3SC');
+  const [ownerName, setOwnerName] = useState('Host');
+  const [roomCode, setRoomCode] = useState(() => generateRoomCode());
   const [joinCode, setJoinCode] = useState(initialRoomCode || '');
   const [visibility, setVisibility] = useState('public');
   const [startingPurse, setStartingPurse] = useState(120.0);
@@ -43,12 +52,7 @@ export default function RoomLobby({ onCreateRoom, onJoinRoom, initialRoomCode = 
 
   // Generate random 6-char room code
   const randomizeCode = () => {
-    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-    let res = '';
-    for (let i = 0; i < 6; i++) {
-      res += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-    setRoomCode(res);
+    setRoomCode(generateRoomCode());
   };
 
   const activeTeam = TEAMS.find(t => t.id === selectedTeamId) || TEAMS[0];

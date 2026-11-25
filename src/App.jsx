@@ -154,6 +154,27 @@ export default function App() {
           break;
         }
 
+        case 'HEARTBEAT_SYNC': {
+          if (action.room && action.room.claimedTeams) {
+            setRoom(prev => {
+              const currentCount = Object.keys(prev.claimedTeams || {}).length;
+              const incomingCount = Object.keys(action.room.claimedTeams || {}).length;
+              if (incomingCount > currentCount) {
+                sounds.playBidSound();
+                return {
+                  ...prev,
+                  claimedTeams: {
+                    ...prev.claimedTeams,
+                    ...action.room.claimedTeams
+                  }
+                };
+              }
+              return prev;
+            });
+          }
+          break;
+        }
+
         case 'REQUEST_ROOM_SYNC': {
           if (isHostRef.current) {
             multiplayer.broadcast({
@@ -294,6 +315,7 @@ export default function App() {
 
     setRoom(updatedRoom);
     multiplayer.init(code, false, teamId, ownerName);
+    multiplayer.saveRoomSnapshot(updatedRoom);
 
     // Broadcast join to Host
     multiplayer.broadcast({
