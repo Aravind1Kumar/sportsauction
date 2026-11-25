@@ -260,52 +260,51 @@ export default function WaitingRoom({
               />
             </div>
 
-            {/* Start Button & Player Count Guard */}
+            {/* Start Button & Launch Control */}
             {isHost ? (
               <div className="space-y-3">
-                {humanPlayersCount < 2 ? (
-                  <>
-                    <div className="p-3.5 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-xs">
-                      <div className="flex items-center gap-2 text-amber-300 font-black mb-1">
-                        <Users className="w-4 h-4 animate-pulse" />
-                        <span>Waiting for Friends to Join</span>
-                      </div>
-                      <p className="text-slate-300 text-[11px] leading-relaxed">
-                        Share room code <strong className="text-amber-400 font-mono text-xs">{room.code}</strong> with your friend.
-                        When they join, their name will appear on the table.
-                      </p>
-                    </div>
+                <button
+                  onClick={() => onStartAuction({ fillBots })}
+                  className="w-full py-4 px-4 bg-gradient-to-r from-emerald-500 via-teal-500 to-emerald-600 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-black text-base uppercase rounded-2xl shadow-[0_10px_25px_rgba(16,185,129,0.35)] transition-all flex items-center justify-center gap-2 transform hover:scale-[1.02] active:scale-[0.98] cursor-pointer"
+                >
+                  <Play className="w-5 h-5 fill-slate-950" />
+                  <span>
+                    {humanPlayersCount >= 2
+                      ? `Start Multiplayer Auction (${humanPlayersCount} Ready) 🔨`
+                      : `Start Auction Arena Now 🔨`
+                    }
+                  </span>
+                </button>
 
-                    <div className="w-full py-3 px-4 bg-slate-950 text-slate-400 font-black text-xs uppercase rounded-2xl border border-slate-800 flex items-center justify-center gap-2 text-center cursor-not-allowed">
-                      <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
-                      <span>Waiting for Players ({humanPlayersCount}/10 Joined)</span>
+                {humanPlayersCount < 2 && (
+                  <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs">
+                    <div className="flex items-center gap-1.5 text-amber-300 font-bold mb-0.5">
+                      <Users className="w-3.5 h-3.5 animate-pulse" />
+                      <span>Waiting for friends to join ({humanPlayersCount}/10)</span>
                     </div>
-
-                    <button
-                      onClick={() => onStartAuction({ fillBots: true })}
-                      className="w-full py-2.5 px-3 bg-slate-800/80 hover:bg-slate-800 hover:text-amber-300 text-slate-400 font-bold text-xs rounded-xl border border-slate-700/60 transition-all flex items-center justify-center gap-2"
-                    >
-                      <Bot className="w-3.5 h-3.5 text-cyan-400" />
-                      <span>Start Solo Practice with 9 AI Bots</span>
-                    </button>
-                  </>
-                ) : (
-                  <button
-                    onClick={() => onStartAuction({ fillBots })}
-                    className="w-full py-4 px-4 bg-gradient-to-r from-emerald-500 via-teal-500 to-emerald-600 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-black text-base uppercase rounded-2xl shadow-[0_10px_25px_rgba(16,185,129,0.35)] transition-all flex items-center justify-center gap-2 transform hover:scale-[1.02] active:scale-[0.98]"
-                  >
-                    <Play className="w-5 h-5 fill-slate-950" />
-                    <span>Start Multiplayer Auction ({humanPlayersCount} Ready) 🔨</span>
-                  </button>
+                    <p className="text-slate-300 text-[11px]">
+                      Share room code <strong className="text-amber-400 font-mono">{room.code}</strong>. You can click <strong>Start Auction Arena Now 🔨</strong> above anytime to begin with AI bots filling open slots!
+                    </p>
+                  </div>
                 )}
               </div>
             ) : (
-              <div className="text-center py-4 px-3 bg-slate-950/80 rounded-2xl border border-slate-800 text-xs text-slate-300 space-y-1">
-                <div className="font-black text-amber-400 flex items-center justify-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-                  <span>Connected to Room {room.code}</span>
+              <div className="space-y-2">
+                <div className="text-center py-3 px-3 bg-slate-950/80 rounded-2xl border border-slate-800 text-xs text-slate-300 space-y-1">
+                  <div className="font-black text-amber-400 flex items-center justify-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+                    <span>Connected to Room {room.code}</span>
+                  </div>
+                  <p className="text-[11px] text-slate-400">Waiting for room host to launch the auction arena...</p>
                 </div>
-                <p className="text-[11px] text-slate-400">Waiting for room host to start the auction arena...</p>
+
+                <button
+                  onClick={() => onStartAuction({ fillBots: true })}
+                  className="w-full py-3 px-3 bg-gradient-to-r from-amber-500 via-yellow-400 to-amber-600 hover:from-amber-400 text-slate-950 font-black text-xs uppercase rounded-xl transition-all flex items-center justify-center gap-2 shadow"
+                >
+                  <Play className="w-4 h-4 fill-slate-950" />
+                  <span>Enter Auction Arena Directly 🔨</span>
+                </button>
               </div>
             )}
           </div>

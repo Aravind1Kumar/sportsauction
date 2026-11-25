@@ -11,6 +11,7 @@ class MultiplayerManager {
     this.ws = null;
     this.sse = null;
     this.reconnectTimer = null;
+    this.pollTimer = null;
     this.listeners = new Set();
     this.lastProcessedMessageId = null;
   }
@@ -103,6 +104,33 @@ class MultiplayerManager {
     } catch (e) {
       this.fallbackToSSE(topic);
     }
+
+    // Polling fallback every 1.5s to guarantee 100% reliable cross-device sync even on mobile networks
+    if (this.pollTimer) clearInterval(this.pollTimer);
+    this.pollTimer = setInterval(async () => {
+      if (!this.roomCode) return;
+      try {
+        const res = await fetch(`https://ntfy.sh/${topic}/json?poll=1`);
+        if (res.ok) {
+          const text = await res.text();
+          const lines = text.trim().split('\n').filter(Boolean);
+          for (const line of lines) {
+            try {
+              const raw = JSON.parse(line);
+              if (raw.event === 'message' && raw.message) {
+                if (raw.id && raw.id === this.lastProcessedMessageId) continue;
+                this.lastProcessedMessageId = raw.id;
+
+                const data = JSON.parse(raw.message);
+                if (data.senderId !== this.clientId) {
+                  this.notifyListeners(data);
+                }
+              }
+            } catch (e) {}
+          }
+        }
+      } catch (e) {}
+    }, 1500);
   }
 
   // Server-Sent Events fallback for mobile browsers where WebSocket might be closed in background
@@ -209,6 +237,10 @@ class MultiplayerManager {
   }
 
   cleanup() {
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
